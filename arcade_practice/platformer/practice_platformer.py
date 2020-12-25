@@ -1,0 +1,342 @@
+"""
+Platformer Game
+"""
+import arcade
+import ctypes
+
+# Constants
+user32 = ctypes.windll.user32
+SCREEN_WIDTH = user32.GetSystemMetrics(0)
+SCREEN_HEIGHT = user32.GetSystemMetrics(1)
+SCREEN_TITLE = "Platformer"
+
+WIDTH_SCALING = (SCREEN_WIDTH/1000)
+
+# SCREEN_WIDTH = 1000
+# SCREEN_HEIGHT = 650
+
+#Constants used to scale our sprites from their original size
+CHARACTER_SCALING = .5*WIDTH_SCALING
+TILE_SCALING = 0.5*WIDTH_SCALING
+COIN_SCALING = 0.5*WIDTH_SCALING
+TILE_WIDTH = int(64*WIDTH_SCALING)
+
+# Movement speed of player, in pixels per frame
+PLAYER_MOVEMENT_SPEED = 6*WIDTH_SCALING
+UPDATES_PER_FRAME = 5
+PLAYER_JUMP_SPEED = 20*WIDTH_SCALING
+GRAVITY = 1.3*WIDTH_SCALING
+
+# How many pixels to keep as a minimum margin between the character
+# and the edge of the screen.
+LEFT_VIEWPORT_MARGIN = int(SCREEN_WIDTH/4)
+RIGHT_VIEWPORT_MARGIN = int(SCREEN_WIDTH/4)
+BOTTOM_VIEWPORT_MARGIN = int(TILE_WIDTH)
+TOP_VIEWPORT_MARGIN = int(2*TILE_WIDTH)
+
+# Constants used to track if the player is facing left or right
+RIGHT_FACING = 0
+LEFT_FACING = 1
+
+def load_texture_pair(filename):
+    """
+    Load a texture pair, with the second being a mirror image.
+    """
+    return [
+        arcade.load_texture(filename),
+        arcade.load_texture(filename, flipped_horizontally=True)
+    ]
+
+class PlayerCharacter(arcade.Sprite):
+    
+    def __init__(self):
+
+        # Set up parent class
+        super().__init__()
+
+        # Default to face-right
+        self.character_face_direction = RIGHT_FACING
+
+        # Used for flipping between image sequences
+        self.cur_texture = 0
+
+        self.scale = CHARACTER_SCALING
+
+        # Adjust the collision box. Default includes too much empty space
+        # side-to-side. Box is centered at sprite center, (0, 0)
+
+        # --- Load Textures ---
+
+        # Images from Kenney.nl's Asset Pack 3
+        main_path = ":resources:images/animated_characters/male_adventurer/maleAdventurer"
+        # main_path = ":resources:images/animated_characters/female_person/femalePerson"
+        # main_path = ":resources:images/animated_characters/male_person/malePerson"
+        # main_path = ":resources:images/animated_characters/female_adventurer/femaleAdventurer"
+        # main_path = ":resources:images/animated_characters/zombie/zombie"
+        # main_path = ":resources:images/animated_characters/robot/robot"
+
+        # Load textures for idle standing
+        self.idle_texture_pair = load_texture_pair(f"{main_path}_idle.png")
+        
+        self.texture = self.idle_texture_pair[self.character_face_direction]
+
+        # Load textures for walking
+        self.walk_textures = []
+        for i in range(8):
+            texture = load_texture_pair(f"{main_path}_walk{i}.png")
+            self.walk_textures.append(texture)
+
+        self.jumping_texture_pair = load_texture_pair(f'{main_path}_jump.png')
+        self.falling_texture_pair = load_texture_pair(f'{main_path}_fall.png')
+
+    def update_animation(self, delta_time: float = 1/60):
+
+        # Figure out if we need to flip face left or right
+        if self.change_x < 0 and self.character_face_direction == RIGHT_FACING:
+            self.character_face_direction = LEFT_FACING
+        elif self.change_x > 0 and self.character_face_direction == LEFT_FACING:
+            self.character_face_direction = RIGHT_FACING
+
+        # check for jumping
+        if self.change_y > 0:
+            self.texture = self.jumping_texture_pair[self.character_face_direction]
+            return
+        elif self.change_y < 0:
+            self.texture = self.falling_texture_pair[self.character_face_direction]
+            return
+
+        # Idle animation
+        if self.change_x == 0 and self.change_y == 0:
+            self.texture = self.idle_texture_pair[self.character_face_direction]
+            return
+
+        # Walking animation
+        self.cur_texture += 1
+        if self.cur_texture > 7 * UPDATES_PER_FRAME:
+            self.cur_texture = 0
+        frame = self.cur_texture // UPDATES_PER_FRAME
+        direction = self.character_face_direction
+        self.texture = self.walk_textures[frame][direction]
+
+class MyGame(arcade.Window):
+    """
+    Main application class.
+    """
+
+    def __init__(self):
+
+        # Call the parent class and set up the window
+        super().__init__(SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_TITLE)
+
+        # These are 'lists' that keep track of our sprites. Each sprite should
+        # go into a list.
+        self.player_list = None
+        self.wall_list = None
+        self.coin_list = None
+        self.scenery_list = None
+
+        # Separate variable that holds the player sprite
+        self.player_sprite = None
+
+        # Our physics engine
+        self.physics_engine = None
+
+        # Used to keep track of our scrolling
+        self.view_bottom = 0
+        self.view_left = 0
+
+        # Keep track of the score
+        self.score = 0
+
+        # set movement keys
+        self.keys_pressed = []
+
+        # Load sounds
+        self.collect_coin_sound = arcade.load_sound(":resources:sounds/coin2.wav")
+        self.jump_sound = arcade.load_sound(":resources:sounds/jump3.wav")
+
+        arcade.set_background_color(arcade.csscolor.CORNFLOWER_BLUE)
+
+    def setup(self):
+        """ Set up the game here. Call this function to restart the game. """
+
+        # Used to keep track of our scrolling
+        self.view_bottom = 0
+        self.view_left = 0
+
+        # Keep track of the score
+        self.score = 0
+
+        # Create the Sprite lists
+        self.player_list = arcade.SpriteList()
+
+        # Set up the player, specifically placing it at these coordinates.
+        self.player_sprite = PlayerCharacter()
+        self.player_sprite.scale = CHARACTER_SCALING
+        self.player_sprite.center_x = TILE_WIDTH
+        self.player_sprite.center_y = 2*TILE_WIDTH
+        self.player_list.append(self.player_sprite)
+
+        # --- Load in a map from the tiled editor ---
+
+        # Name of map file to load
+        map_name = "map.tmx"
+        # Name of the layer in the file that has our platforms/walls
+        platforms_layer_name = 'Platforms'
+        # Name of the layer that has items for pick-up
+        coins_layer_name = 'Coins'
+        # Name of the layer that has background objects
+        scenery_layer_name = 'Scenery'
+
+        # Read in the tiled map
+        my_map = arcade.tilemap.read_tmx(map_name)
+
+        # -- Platforms
+        self.wall_list = arcade.tilemap.process_layer(map_object=my_map,
+                                                      layer_name=platforms_layer_name,
+                                                      scaling=TILE_SCALING,
+                                                      use_spatial_hash=True)
+
+        # -- Coins
+        self.coin_list = arcade.tilemap.process_layer(my_map, coins_layer_name, TILE_SCALING)
+
+        # -- Scenery
+        self.scenery_list = arcade.tilemap.process_layer(my_map, scenery_layer_name, TILE_SCALING)
+
+        # --- Other stuff
+        # Set the background color
+        if my_map.background_color:
+            arcade.set_background_color(my_map.background_color)
+
+                # Create the 'physics engine'; (player, collision tiles, gravity)
+        self.physics_engine = arcade.PhysicsEnginePlatformer(self.player_sprite,
+                                                             self.wall_list,
+                                                             GRAVITY)
+
+
+    def on_draw(self):
+        """ Render the screen. """
+
+        arcade.start_render()
+        # Code to draw the screen goes here
+
+        # Draw our sprites
+        self.wall_list.draw()
+        self.coin_list.draw()
+        self.scenery_list.draw()
+        self.player_list.draw()
+
+        # Draw our score on the screen, scrolling it with the viewport
+        score_text = f"Score: {self.score}"
+        arcade.draw_text(score_text, 10*WIDTH_SCALING + self.view_left, 10*(WIDTH_SCALING) + self.view_bottom,
+                         arcade.csscolor.WHITE, 18*WIDTH_SCALING)
+
+    def on_key_press(self, key, modifiers):
+        """Called whenever a key is pressed. """
+
+        if key == arcade.key.UP or key == arcade.key.W:
+            if self.physics_engine.can_jump():
+                self.player_sprite.change_y = PLAYER_JUMP_SPEED
+                arcade.play_sound(self.jump_sound)
+        # elif key == arcade.key.DOWN or key == arcade.key.S:
+        #     self.player_sprite.change_y = -PLAYER_MOVEMENT_SPEED
+        elif key == arcade.key.LEFT or key == arcade.key.A:
+            self.player_sprite.change_x = -PLAYER_MOVEMENT_SPEED
+            self.keys_pressed.append('A')
+        elif key == arcade.key.RIGHT or key == arcade.key.D:
+            self.player_sprite.change_x = PLAYER_MOVEMENT_SPEED
+            self.keys_pressed.append('D')
+        elif key == arcade.key.R:
+            self.setup()
+
+    def on_key_release(self, key, modifiers):
+        """Called when the user releases a key. """
+
+        if key == arcade.key.LEFT or key == arcade.key.A:
+            self.keys_pressed.remove('A')
+            if self.player_sprite.change_x == -PLAYER_MOVEMENT_SPEED:
+                if 'D' in self.keys_pressed:
+                    self.player_sprite.change_x = PLAYER_MOVEMENT_SPEED
+                else:
+                    self.player_sprite.change_x = 0
+        elif key == arcade.key.RIGHT or key == arcade.key.D:
+            self.keys_pressed.remove('D')
+            if self.player_sprite.change_x == PLAYER_MOVEMENT_SPEED:
+                if 'A' in self.keys_pressed:
+                    self.player_sprite.change_x = -PLAYER_MOVEMENT_SPEED
+                else:
+                    self.player_sprite.change_x = 0
+
+    def on_update(self, delta_time):
+        """ Movement and game logic """
+
+        # Move the player with the physics engine
+        self.physics_engine.update()
+
+        # See if we hit any coins
+        coin_hit_list = arcade.check_for_collision_with_list(self.player_sprite,
+                                                             self.coin_list)
+
+        # Update the players animation
+        self.player_list.update_animation()
+
+        # Loop through each coin we hit (if any) and remove it
+        for coin in coin_hit_list:
+            # Remove the coin
+            coin.remove_from_sprite_lists()
+            # Play a sound
+            arcade.play_sound(self.collect_coin_sound)
+            # Add one to the score
+            self.score += 1
+
+        # --- Manage Scrolling ---
+
+        # Track if we need to change the viewport
+
+        changed = False
+
+        # Scroll left
+        left_boundary = self.view_left + LEFT_VIEWPORT_MARGIN
+        if self.player_sprite.left < left_boundary:
+            self.view_left -= left_boundary - self.player_sprite.left
+            changed = True
+
+        # Scroll right
+        right_boundary = self.view_left + SCREEN_WIDTH - RIGHT_VIEWPORT_MARGIN
+        if self.player_sprite.right > right_boundary:
+            self.view_left += self.player_sprite.right - right_boundary
+            changed = True
+
+        # Scroll up
+        top_boundary = self.view_bottom + SCREEN_HEIGHT - TOP_VIEWPORT_MARGIN
+        if self.player_sprite.top > top_boundary:
+            self.view_bottom += self.player_sprite.top - top_boundary
+            changed = True
+
+        # Scroll down
+        bottom_boundary = self.view_bottom + BOTTOM_VIEWPORT_MARGIN
+        if self.player_sprite.bottom < bottom_boundary:
+            self.view_bottom -= bottom_boundary - self.player_sprite.bottom
+            changed = True
+
+        if changed:
+            # Only scroll to integers. Otherwise we end up with pixels that
+            # don't line up on the screen
+            self.view_bottom = int(self.view_bottom)
+            self.view_left = int(self.view_left)
+
+            # Do the scrolling
+            arcade.set_viewport(self.view_left,
+                                SCREEN_WIDTH + self.view_left,
+                                self.view_bottom,
+                                SCREEN_HEIGHT + self.view_bottom)
+
+def main():
+    """ Main method """
+    window = MyGame()
+    window.setup()
+    arcade.run()
+
+
+if __name__ == "__main__":
+    main()
